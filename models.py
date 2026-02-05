@@ -241,6 +241,83 @@ class MedNet(nn.Module):
         return x
 
 
+# ============== MedNet28: Adapted for 28x28 Input ==============
+
+class MedNet28(nn.Module):
+    """
+    MedNet adapted for 28x28 input images (e.g., PneumoniaMNIST at native resolution).
+
+    Key differences from the 224x224 MedNet:
+    - Reduced from 5 to 3 ResidualDSCBAMBlock stages to avoid feature maps
+      shrinking below 7x7 (where the 7x7 spatial attention kernel in CBAM
+      becomes larger than the feature map and loses spatial meaning).
+    - Halved channel widths (32 → 64 → 128 → 256) since 28x28 images carry
+      far less spatial information than 224x224.
+    - Smaller classifier head (256 → 128 → num_classes) to match reduced capacity.
+
+    Spatial dimension progression:
+        Input  28x28 → Stem 28x28 (32ch)
+        Stage1 28x28 (64ch, stride=1)
+        Stage2 14x14 (128ch, stride=2)
+        Stage3  7x7  (256ch, stride=2)
+        AdaptiveAvgPool → 1x1
+
+    Args:
+        in_channels (int): Number of input channels (1 for grayscale, 3 for RGB)
+        num_classes (int): Number of output classes
+        dropout (float): Dropout probability (default: 0.4)
+    """
+    def __init__(self, in_channels=1, num_classes=2, dropout=0.4):
+        super().__init__()
+
+        # Initial convolution (smaller base width for 28x28)
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True)
+        )
+
+        # 3 Stages of ResidualDSCBAMBlocks
+        # Only 2 stride-2 stages so the smallest feature map is 7x7,
+        # which still supports CBAM's 7x7 spatial attention kernel.
+        self.stage1 = ResidualDSCBAMBlock(32, 64, stride=1)    # 28x28
+        self.stage2 = ResidualDSCBAMBlock(64, 128, stride=2)   # 14x14
+        self.stage3 = ResidualDSCBAMBlock(128, 256, stride=2)  #  7x7
+
+        # Classifier head
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(dropout)
+        self.fc1 = nn.Linear(256, 128)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        # Feature extraction
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+
+        # Classification
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.dropout(x)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+
+        return x
+
+    def get_features(self, x):
+        """Extract features before the classifier (for visualization/analysis)."""
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        return x
+
+
 # ============== Focal Loss (for Class Imbalance) ==============
 
 class FocalLoss(nn.Module):
@@ -284,7 +361,7 @@ def count_parameters(model):
 
 def create_mednet_for_pneumonia(dropout=0.4):
     """
-    Create MedNet configured for PneumoniaMNIST.
+    Create MedNet (224x224) configured for PneumoniaMNIST.
     
     Args:
         dropout (float): Dropout probability
@@ -299,25 +376,54 @@ def create_mednet_for_pneumonia(dropout=0.4):
     )
 
 
+def create_mednet28_for_pneumonia(dropout=0.4):
+    """
+    Create MedNet28 (28x28) configured for PneumoniaMNIST at native resolution.
+    
+    Args:
+        dropout (float): Dropout probability
+    
+    Returns:
+        MedNet28 model configured for 1-channel grayscale input and 2-class output
+    """
+    return MedNet28(
+        in_channels=1,    # Grayscale chest X-rays
+        num_classes=2,    # Normal vs Pneumonia
+        dropout=dropout
+    )
+
+
 # ============== Test Code ==============
 
 if __name__ == "__main__":
-    # Test the model
+    # Test the original MedNet (224x224)
     model = create_mednet_for_pneumonia()
-    print(f"MedNet Parameters: {count_parameters(model):,}")
+    print(f"MedNet (224x224) Parameters: {count_parameters(model):,}")
     
-    # Test with PneumoniaMNIST input size (28x28)
-    x = torch.randn(4, 1, 28, 28)
+    x = torch.randn(4, 1, 224, 224)
     output = model(x)
-    print(f"Input shape: {x.shape}")
-    print(f"Output shape: {output.shape}")
+    print(f"  Input shape: {x.shape}")
+    print(f"  Output shape: {output.shape}")
     
-    # Test feature extraction
     features = model.get_features(x)
-    print(f"Feature shape: {features.shape}")
+    print(f"  Feature shape: {features.shape}")
+    
+    # Test MedNet28 (28x28)
+    print()
+    model28 = create_mednet28_for_pneumonia()
+    print(f"MedNet28 (28x28) Parameters: {count_parameters(model28):,}")
+    
+    x28 = torch.randn(4, 1, 28, 28)
+    output28 = model28(x28)
+    print(f"  Input shape: {x28.shape}")
+    print(f"  Output shape: {output28.shape}")
+    
+    features28 = model28.get_features(x28)
+    print(f"  Feature shape: {features28.shape}")
     
     # Test Focal Loss
+    print()
     criterion = FocalLoss()
     targets = torch.tensor([0, 1, 1, 0])
-    loss = criterion(output, targets)
+    loss = criterion(output28, targets)
     print(f"Focal Loss: {loss.item():.4f}")
